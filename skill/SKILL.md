@@ -72,6 +72,33 @@ After any operation, capture a photo to verify the result:
 | Image upside down | Camera orientation | Add/remove `-vf "vflip"` |
 | Nature Remo 404 | Wrong appliance ID | Re-fetch appliance list |
 
+## Periodic Observation (git-based state tracking)
+
+For automated room monitoring, use the capture→analyze→diff→commit loop:
+
+1. Capture photo: `ffmpeg ... -update 1 /tmp/camera.jpg -y`
+2. Analyze with vision model → generate `state.json` (lights, AC, TV, people, room condition)
+3. Compare with previous `state.json` → generate `diff.md`
+4. `git add -A && git commit -m "state: {summary of changes}"`
+5. Report significant changes to Discord
+
+### state.json schema
+```json
+{
+  "timestamp": "ISO-8601",
+  "lights": { "living_kitchen": "on|off", ... },
+  "ac": { "living": { "mode": "warm|cool|auto", "temp": 26 } },
+  "tv": "on|off",
+  "people": { "count": 0, "locations": [] },
+  "room": { "floor_clean": true, "bed_made": false, "curtain": "open|closed" }
+}
+```
+
+### Reporting rules
+- Changes detected → report diff to Discord
+- No changes → commit silently
+- Late night (23:00-08:00) → only report urgent issues (all lights on + no people)
+
 ## Setup Script
 
 Run `scripts/setup-check.sh` to verify all prerequisites are met.

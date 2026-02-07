@@ -298,6 +298,108 @@ curl -s -X POST \
   -d "button=power"
 ```
 
+## 定点観測システム 📸
+
+カメラ + AI + git を組み合わせた、部屋の状態変化を自動追跡するシステム。
+
+### コンセプト
+
+```
+撮影 → AI分析 → 状態JSON生成 → 前回との差分検出 → git commit
+                                                      ↓
+                                              git log = 生活ログ
+```
+
+**ファイルはたった3つ:**
+
+| ファイル | 内容 |
+|----------|------|
+| `camera.jpg` | 最新の撮影画像 |
+| `state.json` | 現在のオブジェクト状態 |
+| `diff.md` | 前回との差分レポート |
+
+毎回上書き → コミットするだけ。`git log` が時系列データベースになります。
+
+### state.json の構造
+
+```json
+{
+  "timestamp": "2026-02-07T09:00:00+09:00",
+  "lights": {
+    "living_kitchen": "on",
+    "living_garden": "on",
+    "living_bed": "off",
+    "bedroom": "off"
+  },
+  "ac": {
+    "living": { "mode": "warm", "temp": 26 }
+  },
+  "tv": "on",
+  "people": {
+    "count": 1,
+    "locations": ["desk"]
+  },
+  "room": {
+    "floor_clean": true,
+    "bed_made": false,
+    "curtain": "closed"
+  }
+}
+```
+
+### diff.md の例
+
+```markdown
+## 🔄 変化検出 (09:00 → 09:30)
+
+- 💡 リビングベッド側: on → **off**
+- 🧑 人数: 2 → **1** (じゅんちゃんが外出？)
+- 📺 テレビ: on → **off**
+```
+
+### git を時系列データベースとして使う
+
+```bash
+# 最新の状態
+cat state.json
+
+# 前回との差分
+git diff HEAD~1 state.json
+
+# 全変化の履歴
+git log -p state.json
+
+# 特定の日の状態
+git log --after="2026-02-07" --before="2026-02-08" --oneline state.json
+
+# 「電気が消えた」タイミングを探す
+git log -p state.json | grep -A2 -B2 '"living_kitchen"'
+```
+
+### cron ジョブでの自動化（OpenClaw）
+
+OpenClaw の cron 機能で定期実行:
+
+```
+15分おき: 撮影 → 分析 → state.json更新 → git commit
+変化あり: Discord に差分を報告
+変化なし: 静かにコミットだけ
+```
+
+### なぜ git なのか
+
+| 方式 | メリット | デメリット |
+|------|----------|------------|
+| **CSV/DB に蓄積** | クエリが楽 | ファイルが肥大化、別途管理が必要 |
+| **git で管理** | ファイルは常に最新3つだけ、全履歴はgitに | 複雑なクエリは苦手 |
+
+git の利点:
+- 🗂️ ファイルは常にスリム（最新状態のみ）
+- 📜 全履歴が `git log` で追える
+- 🔍 `git diff` で任意の2時点を比較できる
+- 💾 GitHub にバックアップされる
+- 🤖 AI エージェントが `git log` を読んでパターンを学習できる
+
 ## OpenClaw スキル
 
 このセットアップを OpenClaw スキルとしても公開しています。
