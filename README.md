@@ -1,116 +1,130 @@
 # WSL Smart Home Camera 📷🏠
 
-**WSL2 + USBカメラ + Nature Remo で、AIエージェントが部屋を見て家電を操作する**
+**WSL2 + USBカメラ + Nature Remoで、AIエージェントが部屋の状態を確認し、家電を操作するための参考ガイドです。**
 
-AI エージェント（[OpenClaw](https://github.com/openclaw/openclaw)）が USB カメラで部屋を撮影・分析し、Nature Remo API 経由で照明・エアコン・テレビなどを操作するためのガイドです。
+このリポジトリは、USBカメラで撮影した画像をAIが分析し、Nature Remo API経由で照明・エアコン・テレビなどを操作したうえで、もう一度撮影して結果を確認する流れをまとめています。
 
-## 構成図
+> **Status:** 実環境で行ったセットアップをもとにした実験・参考実装です。完成済みの製品や、そのまま本番運用できるセキュリティ監査済みパッケージではありません。
 
-```
+## 最初に確認する安全上の境界
+
+- カメラ画像には、人物・室内・生活時間などの個人情報が写る可能性があります
+- `camera.jpg`、`state.json`、`diff.md`などの実運用データは、この公開リポジトリへコミットしないでください
+- 履歴をGitで残す場合は、ローカルのみ、またはアクセスを制限した**非公開リポジトリ**を使用してください
+- Nature Remoのアクセストークンを、README、ログ、Issue、コミットへ貼らないでください
+- 家電操作は誤動作する可能性があります。高温・低温、火気、防犯、生命や財産に関わる操作をAIだけへ任せないでください
+- 自動化する場合も、実行回数、対象家電、停止条件、操作後の確認を明示してください
+
+## 構成
+
+```text
 ┌─────────────────────────────────────────────┐
-│  Windows PC                                 │
-│  ┌────────────┐     ┌────────────────────┐  │
-│  │ USB Camera │────▶│  WSL2 (Ubuntu)     │  │
-│  │ (Depstech) │     │  ┌──────────────┐  │  │
-│  └────────────┘     │  │  OpenClaw    │  │  │
-│    usbipd-win       │  │  (AI Agent)  │  │  │
-│                     │  └──────┬───────┘  │  │
-│                     └─────────┼──────────┘  │
-└─────────────────────────────────┼────────────┘
-                                  │ HTTPS
-                      ┌───────────▼───────────┐
-                      │  Nature Remo Cloud API │
-                      └───────────┬───────────┘
-                                  │ IR
-                      ┌───────────▼───────────┐
-                      │  家電（照明/エアコン/TV）│
-                      └───────────────────────┘
+│ Windows PC                                  │
+│  ┌────────────┐      ┌───────────────────┐  │
+│  │ USB Camera │ ───▶ │ WSL2 / Ubuntu     │  │
+│  └────────────┘      │  ┌─────────────┐  │  │
+│      usbipd-win      │  │ AI Agent    │  │  │
+│                      │  └──────┬──────┘  │  │
+│                      └─────────┼─────────┘  │
+└────────────────────────────────┼────────────┘
+                                 │ HTTPS
+                     ┌───────────▼────────────┐
+                     │ Nature Remo Cloud API  │
+                     └───────────┬────────────┘
+                                 │ IR
+                     ┌───────────▼────────────┐
+                     │ 照明 / エアコン / TV   │
+                     └────────────────────────┘
 ```
 
 ## できること
 
-- 📷 **部屋の撮影** — USBカメラで定期的に撮影
-- 👁️ **画像分析** — AI が部屋の状態を判定（電気ON/OFF、人の在/不在、散らかり具合）
-- 💡 **家電操作** — Nature Remo API で照明・エアコン・テレビを制御
-- 🔄 **操作→撮影→確認ループ** — 操作結果をカメラで検証
+- USBカメラで部屋を撮影する
+- AIで照明、人の在・不在、室内の変化などを参考分析する
+- Nature Remo APIで家電を操作する
+- 操作後に再撮影し、実際に状態が変わったか確認する
+- 最新状態と前回との差分を、ローカルのGit履歴として残す
 
 ## 必要なもの
 
-| 項目 | 詳細 |
-|------|------|
-| **OS** | Windows 10/11 + WSL2 (Ubuntu) |
-| **カメラ** | USB Webカメラ（例: Depstech webcam） |
-| **スマートリモコン** | [Nature Remo](https://nature.global/) |
-| **ツール** | ffmpeg, usbipd-win |
-| **AI エージェント** | [OpenClaw](https://github.com/openclaw/openclaw)（推奨）または任意の LLM |
+| 項目 | 内容 |
+| --- | --- |
+| OS | Windows 10 / 11 + WSL2（Ubuntu） |
+| カメラ | USB Webカメラ |
+| スマートリモコン | Nature Remo |
+| ツール | `usbipd-win`、`ffmpeg` |
+| AIエージェント | OpenClawまたは同等の仕組み |
 
 ## セットアップ
 
-### 1. usbipd-win のインストール
+### 1. usbipd-winを入れる
 
-Windows 側で USB デバイスを WSL に転送するためのツール。
+管理者権限のWindows PowerShellで実行します。
 
 ```powershell
-# Windows PowerShell (管理者)
 winget install --id dorssel.usbipd-win
 ```
 
-> ⚠️ **インストール後、UACダイアログが表示されたら「はい」を押す**
+インストール後にUACダイアログが表示された場合は、内容を確認して許可します。
 
-### 2. USB カメラを WSL にアタッチ
+### 2. USBカメラをWSLへ接続する
 
 ```powershell
-# Windows PowerShell (管理者)
-
-# カメラの BUSID を確認
+# Windows PowerShell（管理者）
 usbipd list
 
-# 出力例:
-# BUSID  VID:PID    DEVICE                          STATE
-# 1-3    1d6c:0103  Depstech webcam                 Not shared
-
-# バインド（初回のみ）
+# 初回だけ共有を許可
 usbipd bind --busid 1-3
 
-# WSL にアタッチ
+# WSLへ接続
 usbipd attach --wsl --busid 1-3
 ```
 
+`1-3`は例です。`usbipd list`に表示された実際のBUSIDへ置き換えてください。
+
+WSL側では、まず現在のユーザーを`video`グループへ追加する方法を推奨します。
+
 ```bash
-# WSL 側で権限を設定
-sudo chmod 666 /dev/video0 /dev/video1
+sudo usermod -aG video "$USER"
 ```
 
-### 3. ffmpeg のインストール
+反映にはログアウトまたはWSLの再起動が必要です。撮影テストのために一時的に権限を緩める場合でも、共有PCや常用環境で`chmod 666`を恒久運用しないでください。
+
+### 3. ffmpegを入れる
 
 ```bash
-# WSL (Ubuntu)
 sudo apt install -y ffmpeg
 ```
 
-### 4. 撮影テスト
+### 4. 撮影を確認する
 
 ```bash
-# MJPEG フォーマット、1920x1080 で撮影
 ffmpeg -f v4l2 -input_format mjpeg -video_size 1920x1080 \
   -i /dev/video0 -frames:v 1 -update 1 /tmp/camera.jpg -y
 ```
 
-> Windows 側からは `\\wsl$\Ubuntu\tmp\camera.jpg` で確認できます
+Windowsから確認する場合の例:
 
-### 5. Nature Remo API の設定
+```text
+\\wsl$\Ubuntu\tmp\camera.jpg
+```
 
-1. https://home.nature.global/ にログイン
-2. 右上のメニューから「アクセストークン発行」
-3. トークンを安全に保存:
+### 5. Nature Remoトークンを保存する
+
+1. Nature RemoのWeb画面でアクセストークンを発行します
+2. トークンはリポジトリ外の、権限を制限したファイルへ保存します
 
 ```bash
 mkdir -p ~/.config/nature-remo
-echo -n "YOUR_TOKEN_HERE" > ~/.config/nature-remo/token
+printf '%s' 'YOUR_TOKEN_HERE' > ~/.config/nature-remo/token
 chmod 600 ~/.config/nature-remo/token
 ```
 
-4. 家電一覧の取得:
+トークンの中身を画面共有、ログ、AIへの入力、Git差分へ出さないでください。
+
+### 6. 接続と操作を確認する
+
+家電一覧を取得します。
 
 ```bash
 TOKEN=$(cat ~/.config/nature-remo/token)
@@ -118,298 +132,127 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   https://api.nature.global/1/appliances | python3 -m json.tool
 ```
 
-### 6. 家電操作
+照明操作の例:
 
 ```bash
 TOKEN=$(cat ~/.config/nature-remo/token)
 
-# 照明 ON
 curl -s -X POST \
   "https://api.nature.global/1/appliances/{APPLIANCE_ID}/light" \
   -H "Authorization: Bearer $TOKEN" \
   -d "button=on"
+```
 
-# 照明 OFF
-curl -s -X POST \
-  "https://api.nature.global/1/appliances/{APPLIANCE_ID}/light" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d "button=off"
+エアコン操作の例:
 
-# エアコン設定
+```bash
 curl -s -X POST \
   "https://api.nature.global/1/appliances/{APPLIANCE_ID}/aircon_settings" \
   -H "Authorization: Bearer $TOKEN" \
   -d "operation_mode=warm&temperature=26"
 ```
 
-## はまりどころ 🪤
+`APPLIANCE_ID`や操作パラメータは、取得した家電情報と実機の設定に合わせてください。
 
-昨日のセットアップで遭遇した問題と解決策をまとめました。
+## 操作後に必ず確認する
 
-### 1. usbipd のパスが通らない
+Nature Remoの赤外線信号は、遮蔽物、距離、家電の状態などによって届かない場合があります。APIが成功を返しただけで完了とせず、次の確認ループを使います。
 
-**症状**: WSL から `usbipd` コマンドが見つからない
+```text
+1. 撮影して現在の状態を確認
+2. 必要な操作を決める
+3. Nature Remo APIで操作
+4. 再撮影する
+5. 画像またはセンサーで結果を確認
+6. 確認できない場合は停止し、むやみに連続実行しない
+```
 
-**原因**: インストール直後はシェルのPATHに反映されない
+## よくある問題
 
-**解決策**: フルパスで実行
+### usbipdが見つからない
+
+インストール直後はPATHが反映されていない場合があります。新しいPowerShellを開くか、フルパスで確認します。
+
 ```powershell
 & "C:\Program Files\usbipd-win\usbipd.exe" list
 ```
 
-### 2. bind/attach に管理者権限が必要
+### bind / attachでAccess deniedになる
 
-**症状**: `usbipd bind` で "Access denied" エラー
+`bind`は管理者権限のPowerShellで実行します。
 
-**原因**: USB デバイスのバインドには管理者権限が必須
+### カメラを動かしたあと`/dev/video0`が消えた
 
-**解決策**: PowerShell またはコマンドプロンプトを**「管理者として実行」**で開いてから実行
-```powershell
-# 管理者 PowerShell で実行
-usbipd bind --busid 1-3
-usbipd attach --wsl --busid 1-3
-```
+USBの再接続後は、Windows側で`usbipd attach`をやり直します。
 
-### 3. カメラを物理的に動かすと USB が切れる
+### WSL再起動後にカメラが見えない
 
-**症状**: カメラの位置を変えた後、`/dev/video0` が消える
+`usbipd`の接続はセッション単位です。再起動後は再度attachします。自動化する場合も、対象BUSIDと停止条件を固定してください。
 
-**原因**: USB の物理的な抜き差しで usbipd のアタッチが解除される
+### Permission deniedになる
 
-**解決策**: Windows 側で再アタッチ + WSL で権限再設定
-```powershell
-# Windows (管理者)
-usbipd attach --wsl --busid 1-3
-```
+`video`グループへの所属を確認します。
+
 ```bash
-# WSL
-sudo chmod 666 /dev/video0 /dev/video1
+id
+ls -l /dev/video*
 ```
 
-### 4. WSL 再起動のたびにアタッチが必要
+### 画像が紫色・マゼンタになる
 
-**症状**: WSL を再起動すると `/dev/video*` が消える
+カメラが対応している場合は、`-input_format mjpeg`を明示します。
 
-**原因**: usbipd のアタッチはセッション単位。WSL 再起動で解除される
+### 画像が上下逆になる
 
-**解決策**: 毎回手動でアタッチするか、Windows のタスクスケジューラで自動化
-```powershell
-# 自動化スクリプト例 (attach-camera.ps1)
-usbipd attach --wsl --busid 1-3
-```
+設置方向に応じて`vflip`を追加します。
 
-### 5. /dev/video0 の権限エラー
-
-**症状**: `PermissionError: [Errno 13] Permission denied: '/dev/video0'`
-
-**原因**: ユーザーが `video` グループに所属していない
-
-**解決策A（一時的）**:
 ```bash
-sudo chmod 666 /dev/video0 /dev/video1
-```
-
-**解決策B（永続的）**:
-```bash
-sudo usermod -aG video $USER
-# ログアウト→ログインが必要
-```
-
-### 6. 画像の色がおかしい（紫/マゼンタのノイズ）
-
-**症状**: 撮影した画像の一部が紫色になる
-
-**原因**: デフォルトの YUYV フォーマットでの色変換の問題
-
-**解決策**: MJPEG フォーマットを明示的に指定
-```bash
-# ❌ デフォルト（YUYV） — 色がおかしくなることがある
-ffmpeg -f v4l2 -i /dev/video0 -frames:v 1 /tmp/camera.jpg -y
-
-# ✅ MJPEG 指定 — 色が正確
-ffmpeg -f v4l2 -input_format mjpeg -video_size 1920x1080 \
-  -i /dev/video0 -frames:v 1 -update 1 /tmp/camera.jpg -y
-```
-
-### 7. 画像が上下逆
-
-**症状**: カメラの設置方向によって画像が上下逆になる
-
-**解決策**: `vflip` フィルタで反転（カメラの向きに合わせて使う/使わないを決める）
-```bash
-# 上下反転が必要な場合
 ffmpeg -f v4l2 -input_format mjpeg -video_size 1920x1080 \
   -i /dev/video0 -frames:v 1 -vf "vflip" -update 1 /tmp/camera.jpg -y
 ```
 
-### 8. カメラの対応フォーマット確認
+### 対応フォーマットを確認したい
 
 ```bash
-# 利用可能なフォーマットとサイズの一覧
 ffmpeg -f v4l2 -list_formats all -i /dev/video0
 ```
 
-## 操作→撮影→確認ループ
+## 定点観測をGitで残す場合
 
-AI エージェントの信頼性を高めるために、操作後にカメラで確認するループが重要です。
+実運用データは、この公開ガイドとは別の場所へ保存します。
 
-```
-1. 📷 撮影 → 部屋の状態を分析
-2. 🤔 判断 → 「ベッド側の電気がついてる、消すべきか？」
-3. 💡 操作 → Nature Remo API で電気を消す
-4. 📷 再撮影 → 本当に消えたか確認
-5. ✅ 検証 → 左側（ベッド側）が暗くなっている → 成功
+```text
+camera.jpg  # 最新画像。公開リポジトリへ入れない
+state.json  # 現在状態。生活パターンを含み得る
+ diff.md    # 前回との差分。人物や在宅情報を含み得る
 ```
 
-Nature Remo の赤外線信号は届かないこともあるため、この確認ステップが重要です。
+例となる流れ:
 
-## Nature Remo API リファレンス
-
-### 家電一覧取得
-```bash
-curl -s -H "Authorization: Bearer $TOKEN" \
-  https://api.nature.global/1/appliances
+```text
+撮影 → AI分析 → 状態更新 → 前回との差分確認 → ローカルcommit
 ```
 
-### 照明操作
-| ボタン | 動作 |
-|--------|------|
-| `on` | 点灯 |
-| `off` | 消灯 |
-| `on-100` | 全灯 |
-| `night` | 常夜灯 |
-| `bright-up` | 明るく |
-| `bright-down` | 暗く |
+Gitを使う利点は、最新ファイルを小さく保ちながら差分を追えることです。ただし、履歴には削除前の情報も残ります。誤って公開した場合は、通常のファイル削除だけでは履歴から消えません。
 
-### エアコン操作
-| パラメータ | 値 |
-|-----------|-----|
-| `operation_mode` | `cool`, `warm`, `dry`, `blow`, `auto` |
-| `temperature` | 温度 (例: `26`) |
-| `air_volume` | `auto`, `1`-`10` |
-| `air_direction` | `auto`, `swing`, `still` |
-| `button` | 空文字=変更適用, `power-off`=電源OFF |
-
-### テレビ操作
-```bash
-curl -s -X POST \
-  "https://api.nature.global/1/appliances/{ID}/tv" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d "button=power"
-```
-
-## 定点観測システム 📸
-
-カメラ + AI + git を組み合わせた、部屋の状態変化を自動追跡するシステム。
-
-### コンセプト
-
-```
-撮影 → AI分析 → 状態JSON生成 → 前回との差分検出 → git commit
-                                                      ↓
-                                              git log = 生活ログ
-```
-
-**ファイルはたった3つ:**
-
-| ファイル | 内容 |
-|----------|------|
-| `camera.jpg` | 最新の撮影画像 |
-| `state.json` | 現在のオブジェクト状態 |
-| `diff.md` | 前回との差分レポート |
-
-毎回上書き → コミットするだけ。`git log` が時系列データベースになります。
-
-### state.json の構造
-
-```json
-{
-  "timestamp": "2026-02-07T09:00:00+09:00",
-  "lights": {
-    "living_kitchen": "on",
-    "living_garden": "on",
-    "living_bed": "off",
-    "bedroom": "off"
-  },
-  "ac": {
-    "living": { "mode": "warm", "temp": 26 }
-  },
-  "tv": "on",
-  "people": {
-    "count": 1,
-    "locations": ["desk"]
-  },
-  "room": {
-    "floor_clean": true,
-    "bed_made": false,
-    "curtain": "closed"
-  }
-}
-```
-
-### diff.md の例
-
-```markdown
-## 🔄 変化検出 (09:00 → 09:30)
-
-- 💡 リビングベッド側: on → **off**
-- 🧑 人数: 2 → **1** (じゅんちゃんが外出？)
-- 📺 テレビ: on → **off**
-```
-
-### git を時系列データベースとして使う
+運用前に次を確認してください。
 
 ```bash
-# 最新の状態
-cat state.json
-
-# 前回との差分
-git diff HEAD~1 state.json
-
-# 全変化の履歴
-git log -p state.json
-
-# 特定の日の状態
-git log --after="2026-02-07" --before="2026-02-08" --oneline state.json
-
-# 「電気が消えた」タイミングを探す
-git log -p state.json | grep -A2 -B2 '"living_kitchen"'
+git remote -v
+git status
 ```
 
-### cron ジョブでの自動化（OpenClaw）
+リモートが公開設定でないこと、画像・状態ファイルが意図せず追跡されていないことを確認します。
 
-OpenClaw の cron 機能で定期実行:
+## OpenClawスキル
 
-```
-15分おき: 撮影 → 分析 → state.json更新 → git commit
-変化あり: Discord に差分を報告
-変化なし: 静かにコミットだけ
-```
-
-### なぜ git なのか
-
-| 方式 | メリット | デメリット |
-|------|----------|------------|
-| **CSV/DB に蓄積** | クエリが楽 | ファイルが肥大化、別途管理が必要 |
-| **git で管理** | ファイルは常に最新3つだけ、全履歴はgitに | 複雑なクエリは苦手 |
-
-git の利点:
-- 🗂️ ファイルは常にスリム（最新状態のみ）
-- 📜 全履歴が `git log` で追える
-- 🔍 `git diff` で任意の2時点を比較できる
-- 💾 GitHub にバックアップされる
-- 🤖 AI エージェントが `git log` を読んでパターンを学習できる
-
-## OpenClaw スキル
-
-このセットアップを OpenClaw スキルとしても公開しています。
-詳しくは [`skill/`](./skill/) ディレクトリを参照してください。
+このセットアップをOpenClaw向けに整理した資料は [`skill/`](./skill/) にあります。
 
 ## クレジット
 
-- 👻 **ゆうれいちゃん** (yuurei-chan) — ドキュメント作成、セットアップ実施
-- 🧑 **[furoku](https://github.com/furoku)** (ひろき) — プロジェクトオーナー、ハードウェア担当
+- 👻 **ゆうれいちゃん** — ドキュメント作成、セットアップ支援
+- 🧑 **[furoku](https://github.com/furoku)** — プロジェクトオーナー、ハードウェア担当
 
 ## ライセンス
 
-MIT
+[MIT License](LICENSE)
